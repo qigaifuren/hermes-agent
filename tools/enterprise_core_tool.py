@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -55,7 +56,6 @@ from enterprise_core.tools import (
     upload_doc_image,
 )
 from enterprise_core.models import ScheduledJob
-from enterprise_core.tasks import stable_task_id
 from enterprise_core.wecom_client import WeComClient, config_from_env, load_dotenv
 from tools.registry import registry
 
@@ -286,6 +286,13 @@ def _handle_enterprise_write_to_my_resource(args: dict[str, Any], **kwargs: Any)
     return _json_result(result)
 
 
+def _weekly_report_job_id(requester_userid: str, resource_scope: dict[str, Any]) -> str:
+    """确定性 job_id：同一管理者 + 同一范围始终得到同一 id，
+    这样不带 job_id 的重复配置会 upsert 更新同一个 job，而非创建重复报告。"""
+    seed = f"{requester_userid}|{resource_scope}"
+    return "weekly_report_" + hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
+
+
 def _handle_enterprise_schedule_report(args: dict[str, Any], **kwargs: Any) -> str:
     requester = str(args.get("requester_userid") or "").strip()
     if not requester:
@@ -297,9 +304,7 @@ def _handle_enterprise_schedule_report(args: dict[str, Any], **kwargs: Any) -> s
         return _json_result({"error": "resource_scope must be object and recipients must be a list"})
     enabled = bool(args.get("enabled", True))
     repo = _repo()
-    job_id = str(args.get("job_id") or "").strip() or stable_task_id(
-        f"weekly_report:{requester}", requester, "weekly_report", str(scope)
-    )
+    job_id = str(args.get("job_id") or "").strip() or _weekly_report_job_id(requester, scope)
     job = ScheduledJob(
         id=job_id,
         created_by_userid=requester,
