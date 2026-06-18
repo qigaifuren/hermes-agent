@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
 
 from enterprise_core.db import connect
 from enterprise_core.dispatch import dispatch_task
+from enterprise_core.writeback import write_to_my_resource
 from enterprise_core.people import resolve_userid_by_name
 from enterprise_core.repositories import EnterpriseRepository
 from enterprise_core.resources import recommended_fields_for_table
@@ -262,6 +263,25 @@ def _handle_enterprise_dispatch_task(args: dict[str, Any], **kwargs: Any) -> str
     except (ValueError, PermissionError) as exc:
         return _json_result({"error": str(exc)})
     return _resource_json(result)
+
+
+def _handle_enterprise_write_to_my_resource(args: dict[str, Any], **kwargs: Any) -> str:
+    try:
+        records = args.get("records") or []
+        if not isinstance(records, list):
+            return _json_result({"error": "records must be a list"})
+        result = write_to_my_resource(
+            userid=str(args.get("requester_userid") or "").strip(),
+            name_hint=str(args.get("name_hint") or "").strip(),
+            records=[dict(r) for r in records],
+            content=str(args.get("content") or ""),
+            repo=_repo(),
+            wecom_client=_wecom_client(),
+            identity_field=(str(args["identity_field"]).strip() if args.get("identity_field") else None),
+        )
+    except (ValueError, PermissionError) as exc:
+        return _json_result({"error": str(exc)})
+    return _json_result(result)
 
 
 def _handle_enterprise_update_doc_content(args: dict[str, Any], **kwargs: Any) -> str:
@@ -698,6 +718,39 @@ registry.register(
     handler=_handle_enterprise_dispatch_task,
     check_fn=_check_enterprise_core,
     emoji="dispatch",
+)
+
+registry.register(
+    name="enterprise_write_to_my_resource",
+    toolset=ENTERPRISE_TOOLSET,
+    schema={
+        "name": "enterprise_write_to_my_resource",
+        "description": (
+            "员工把数据写入自己有权限的智能表，或把内容追加到有权限的文档。"
+            "只能写有 write 权限的资源；name_hint 用来按表名/文档名定位。"
+            "智能表用 records=[{\"values\": {\"列名\": \"值\"}}]（列必须已存在，否则报错）；"
+            "文档用 content 传要追加的文本。匹配到多个资源会返回 candidates 让你向用户确认。"
+            "可选 identity_field：指定姓名列名，会自动把发起员工姓名填进去。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "requester_userid": {"type": "string", "description": "发起写入的员工 userid"},
+                "name_hint": {"type": "string", "description": "目标表名/文档名关键词"},
+                "records": {
+                    "type": "array",
+                    "items": {"type": "object"},
+                    "description": "智能表记录，每条形如 {\"values\": {\"列名\": \"值\"}}",
+                },
+                "content": {"type": "string", "description": "文档要追加的文本（写文档时）"},
+                "identity_field": {"type": "string", "description": "可选：自动填员工姓名的列名"},
+            },
+            "required": ["requester_userid", "name_hint"],
+        },
+    },
+    handler=_handle_enterprise_write_to_my_resource,
+    check_fn=_check_enterprise_core,
+    emoji="write",
 )
 
 registry.register(
