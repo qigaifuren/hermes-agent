@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from enterprise_core.db import connect
-from enterprise_core.dispatch import dispatch_task
+from enterprise_core.dispatch import dispatch_task, grant_resource_permission
 from enterprise_core.writeback import write_to_my_resource
 from enterprise_core.people import resolve_userid_by_name
 from enterprise_core.repositories import EnterpriseRepository
@@ -822,6 +822,57 @@ registry.register(
     handler=_handle_enterprise_schedule_report,
     check_fn=_check_enterprise_core,
     emoji="schedule",
+)
+
+
+def _handle_enterprise_grant_resource_permission(args: dict[str, Any], **kwargs: Any) -> str:
+    try:
+        members = args.get("member_names") or []
+        if not isinstance(members, list):
+            return _json_result({"error": "member_names must be a list"})
+        result = grant_resource_permission(
+            requester_userid=str(args.get("requester_userid") or "").strip(),
+            resource_name=str(args.get("resource_name") or "").strip(),
+            member_names=[str(m) for m in members],
+            repo=_repo(),
+            wecom_client=_wecom_client(),
+        )
+    except (ValueError, PermissionError) as exc:
+        return _json_result({"error": str(exc)})
+    resource = result["resource"]
+    return _json_result({
+        "status": result["status"],
+        "resource_id": resource.id,
+        "member_userids": result["member_userids"],
+        "reply_text": result["reply_text"],
+    })
+
+
+registry.register(
+    name="enterprise_grant_resource_permission",
+    toolset=ENTERPRISE_TOOLSET,
+    schema={
+        "name": "enterprise_grant_resource_permission",
+        "description": (
+            "给已存在的智能表/文档添加成员读写权限（授权已有资源）。"
+            "用于「把这张表授权给XX」「给某文档加某人读写权限」等。"
+            "resource_name 按名称定位资源；member_names 是成员姓名或 userid 列表。"
+            "授权后默认给成员发卡片通知。注意：这是给【已有】资源补授权；"
+            "若要【新建】表并分发给团队，用 enterprise_dispatch_task。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "requester_userid": {"type": "string", "description": "发起授权的人 userid（须是资源负责人或管理者）"},
+                "resource_name": {"type": "string", "description": "目标表/文档名称"},
+                "member_names": {"type": "array", "items": {"type": "string"}, "description": "被授权成员姓名或 userid 列表"},
+            },
+            "required": ["requester_userid", "resource_name", "member_names"],
+        },
+    },
+    handler=_handle_enterprise_grant_resource_permission,
+    check_fn=_check_enterprise_core,
+    emoji="grant",
 )
 
 registry.register(
