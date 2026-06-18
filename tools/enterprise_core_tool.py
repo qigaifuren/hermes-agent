@@ -54,6 +54,8 @@ from enterprise_core.tools import (
     update_smartsheet_records,
     upload_doc_image,
 )
+from enterprise_core.models import ScheduledJob
+from enterprise_core.tasks import stable_task_id
 from enterprise_core.wecom_client import WeComClient, config_from_env, load_dotenv
 from tools.registry import registry
 
@@ -282,6 +284,40 @@ def _handle_enterprise_write_to_my_resource(args: dict[str, Any], **kwargs: Any)
     except (ValueError, PermissionError) as exc:
         return _json_result({"error": str(exc)})
     return _json_result(result)
+
+
+def _handle_enterprise_schedule_report(args: dict[str, Any], **kwargs: Any) -> str:
+    requester = str(args.get("requester_userid") or "").strip()
+    if not requester:
+        return _json_result({"error": "requester_userid is required"})
+    schedule = str(args.get("schedule") or "0 14 * * 5").strip()
+    scope = args.get("resource_scope") or {}
+    recipients = args.get("recipients") or []
+    if not isinstance(scope, dict) or not isinstance(recipients, list):
+        return _json_result({"error": "resource_scope must be object and recipients must be a list"})
+    enabled = bool(args.get("enabled", True))
+    repo = _repo()
+    job_id = str(args.get("job_id") or "").strip() or stable_task_id(
+        f"weekly_report:{requester}", requester, "weekly_report", str(scope)
+    )
+    job = ScheduledJob(
+        id=job_id,
+        created_by_userid=requester,
+        job_type="weekly_report",
+        schedule=schedule,
+        recipient_policy={"to": [str(r) for r in recipients]},
+        resource_scope=dict(scope),
+        output_formats=["doc", "card"],
+        enabled=enabled,
+    )
+    repo.create_scheduled_job(job)
+    return _json_result({
+        "status": "scheduled" if enabled else "disabled",
+        "job_id": job_id,
+        "schedule": schedule,
+        "resource_scope": scope,
+        "recipients": recipients,
+    })
 
 
 def _handle_enterprise_update_doc_content(args: dict[str, Any], **kwargs: Any) -> str:
@@ -751,6 +787,36 @@ registry.register(
     handler=_handle_enterprise_write_to_my_resource,
     check_fn=_check_enterprise_core,
     emoji="write",
+)
+
+registry.register(
+    name="enterprise_schedule_report",
+    toolset=ENTERPRISE_TOOLSET,
+    schema={
+        "name": "enterprise_schedule_report",
+        "description": (
+            "管理者配置定期工作汇总报告（默认每周五下午）。报告会汇总范围内成员有权限的"
+            "智能表/文档内容，生成报告文档并卡片推送给收件人。schedule 用 cron 表达式"
+            "（默认 '0 14 * * 5' 周五14点）；resource_scope 用 {\"team\":\"周婉倪\"} 或 "
+            "{\"userids\":[...]}；recipients 是收件人 userid 列表。重复传相同 job_id 可更新配置，"
+            "enabled=false 可暂停。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "requester_userid": {"type": "string", "description": "配置报告的管理者 userid"},
+                "schedule": {"type": "string", "description": "cron 表达式，默认 '0 14 * * 5'（周五14点）"},
+                "resource_scope": {"type": "object", "description": "范围，如 {\"team\":\"周婉倪\"} 或 {\"userids\":[\"u1\"]}"},
+                "recipients": {"type": "array", "items": {"type": "string"}, "description": "收件人 userid 列表"},
+                "enabled": {"type": "boolean", "description": "是否启用，默认 true；false 暂停"},
+                "job_id": {"type": "string", "description": "可选：传已有 job_id 更新配置"},
+            },
+            "required": ["requester_userid", "resource_scope", "recipients"],
+        },
+    },
+    handler=_handle_enterprise_schedule_report,
+    check_fn=_check_enterprise_core,
+    emoji="schedule",
 )
 
 registry.register(
