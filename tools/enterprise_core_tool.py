@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from enterprise_core.db import connect
+from enterprise_core.dispatch import dispatch_task
 from enterprise_core.people import resolve_userid_by_name
 from enterprise_core.repositories import EnterpriseRepository
 from enterprise_core.resources import recommended_fields_for_table
@@ -116,6 +117,9 @@ def _handle_enterprise_propose_smartsheet(args: dict[str, Any], **kwargs: Any) -
     permission_names = args.get("permission_names") or []
     if not isinstance(permission_names, list):
         return _json_result({"error": "permission_names must be a list"})
+    field_names = args.get("field_names") or []
+    if not isinstance(field_names, list):
+        return _json_result({"error": "field_names must be a list"})
     if not requester_userid or not conversation_id or not table_name:
         return _json_result({"error": "requester_userid, conversation_id and table_name are required"})
     result = propose_smartsheet(
@@ -124,6 +128,7 @@ def _handle_enterprise_propose_smartsheet(args: dict[str, Any], **kwargs: Any) -
         table_name=table_name,
         permission_names=[str(name) for name in permission_names],
         repo=_repo(),
+        field_names=[str(name) for name in field_names] or None,
     )
     return _json_result(
         {
@@ -139,7 +144,12 @@ def _handle_enterprise_propose_smartsheet(args: dict[str, Any], **kwargs: Any) -
 def _handle_enterprise_create_smartsheet(args: dict[str, Any], **kwargs: Any) -> str:
     repo = _repo()
     client = _wecom_client()
-    create_fields = bool(args.get("create_fields", False))
+    raw_field_names = args.get("field_names") or []
+    if not isinstance(raw_field_names, list):
+        return _json_result({"error": "field_names must be a list"})
+    field_names = [str(name) for name in raw_field_names] or None
+    # 给出真实列名即视为需要建字段，无需用户再显式 create_fields=true。
+    create_fields = bool(args.get("create_fields", False)) or bool(field_names)
     proposal_id = str(args.get("proposal_id") or "").strip()
     if proposal_id:
         result = confirm_smartsheet_creation(
@@ -148,6 +158,7 @@ def _handle_enterprise_create_smartsheet(args: dict[str, Any], **kwargs: Any) ->
             wecom_client=client,
             send_to_userids=[str(userid) for userid in args.get("send_to_userids") or []],
             create_fields=create_fields,
+            field_names=field_names,
         )
     else:
         permission_names = args.get("permission_names") or []
@@ -163,6 +174,7 @@ def _handle_enterprise_create_smartsheet(args: dict[str, Any], **kwargs: Any) ->
             repo=repo,
             wecom_client=client,
             create_fields=create_fields,
+            field_names=field_names,
         )
     resource = result["resource"]
     return _json_result(
@@ -230,6 +242,24 @@ def _handle_enterprise_create_doc(args: dict[str, Any], **kwargs: Any) -> str:
             parentid=str(args.get("parentid") or "").strip(),
         )
     except ValueError as exc:
+        return _json_result({"error": str(exc)})
+    return _resource_json(result)
+
+
+def _handle_enterprise_dispatch_task(args: dict[str, Any], **kwargs: Any) -> str:
+    try:
+        result = dispatch_task(
+            requester_userid=str(args.get("requester_userid") or "").strip(),
+            conversation_id=str(args.get("conversation_id") or kwargs.get("task_id") or "").strip(),
+            task_type=str(args.get("task_type") or "").strip(),
+            name=str(args.get("name") or "").strip(),
+            target_team=str(args.get("target_team") or "").strip(),
+            field_names=_string_list(args.get("field_names") or [], "field_names"),
+            content=str(args.get("content") or ""),
+            repo=_repo(),
+            wecom_client=_wecom_client(),
+        )
+    except (ValueError, PermissionError) as exc:
         return _json_result({"error": str(exc)})
     return _resource_json(result)
 
@@ -556,6 +586,11 @@ registry.register(
                     "items": {"type": "string"},
                     "description": "需要读写权限的员工姓名列表。",
                 },
+                "field_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "用户数据的真实列名（如 订单ID、日期、客户...）。给出时用它替代按表名推荐的字段；为空则回退启发式推荐。",
+                },
             },
             "required": ["requester_userid", "conversation_id", "table_name", "permission_names"],
         },
@@ -570,7 +605,7 @@ registry.register(
     toolset=ENTERPRISE_TOOLSET,
     schema={
         "name": "enterprise_create_smartsheet",
-        "description": "Create a real WeCom smartsheet, persist docid/resource/permissions/audit to Postgres, and optionally send the link. Use this immediately when the user asks to create/generate a table or random test smartsheet; do not only promise that you will create it. Accept either proposal_id or direct table/permission/send names when the user has clearly asked to create now.",
+        "description": "Create a real WeCom smartsheet, persist docid/resource/permissions/audit to Postgres, and optionally send the link. Use this immediately when the user asks to create/generate a table or random test smartsheet; do not only promise that you will create it. Accept either proposal_id or direct table/permission/send names when the user has clearly asked to create now. 当用户贴了带表头的数据（如订单表）时，必须从数据中抽取真实列名传 field_names，建表后再调用 enterprise_smartsheet_get_schema 取 sheet_id、enterprise_smartsheet_add_records 按列名分批写入所有数据行；不要只建空表。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -593,9 +628,14 @@ registry.register(
                     "items": {"type": "string"},
                     "description": "使用 proposal_id 创建时可填，创建后要发送链接的企业微信 userid 列表。",
                 },
+                "field_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "用户数据的真实列名（如 订单ID、日期、客户...）。给出时会自动建这些列（FIELD_TYPE_TEXT）并清理 WeCom 默认列；用户贴了带表头的数据时必须传。",
+                },
                 "create_fields": {
                     "type": "boolean",
-                    "description": "是否调用智能表格字段 API 自动建字段。默认 false，因为字段类型枚举仍需单独验证。",
+                    "description": "是否自动建字段（字段类型统一用 FIELD_TYPE_TEXT）。一般不用显式设；传了 field_names 即视为 true。",
                     "default": False,
                 },
             },
@@ -629,6 +669,35 @@ registry.register(
     handler=_handle_enterprise_create_doc,
     check_fn=_check_enterprise_core,
     emoji="doc",
+)
+
+registry.register(
+    name="enterprise_dispatch_task",
+    toolset=ENTERPRISE_TOOLSET,
+    schema={
+        "name": "enterprise_dispatch_task",
+        "description": (
+            "管理者（gm/supervisor/boss）分发任务：创建带列的智能表或带内容的文档，"
+            "自动授权给目标团队全部成员并推送卡片。task_type='smartsheet' 时用 field_names 传列名；"
+            "task_type='doc' 时用 content 传 Markdown 内容。target_team 可传 '周婉倪团队' 或 '周婉倪' 或 userid。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "requester_userid": {"type": "string", "description": "发起分发的管理者 userid"},
+                "conversation_id": {"type": "string"},
+                "task_type": {"type": "string", "enum": ["smartsheet", "doc"]},
+                "name": {"type": "string", "description": "表名或文档标题"},
+                "target_team": {"type": "string", "description": "目标团队，如 '周婉倪团队'"},
+                "field_names": {"type": "array", "items": {"type": "string"}, "description": "智能表列名（task_type=smartsheet 时）"},
+                "content": {"type": "string", "description": "文档 Markdown 内容（task_type=doc 时）"},
+            },
+            "required": ["requester_userid", "task_type", "name", "target_team"],
+        },
+    },
+    handler=_handle_enterprise_dispatch_task,
+    check_fn=_check_enterprise_core,
+    emoji="dispatch",
 )
 
 registry.register(
@@ -946,7 +1015,7 @@ registry.register(
 for _name, _description, _handler, _records_status in [
     (
         "enterprise_smartsheet_add_records",
-        "Add rows to a WeCom smartsheet. Records must use field titles as keys, not field IDs.",
+        'Add rows to a WeCom smartsheet. Each record MUST have a "values" wrapper: [{"values": {"列名1": "值1", "列名2": "值2"}}]. Do NOT send flat dicts like [{"列名": "值"}] — those create empty rows. Field keys must be field titles, not field IDs.',
         _handle_enterprise_smartsheet_add_records,
         "records",
     ),
