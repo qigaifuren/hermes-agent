@@ -1543,6 +1543,8 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        # 可信身份：网关在 HTTP 头注入认证用户；工具层据此绑定 requester，忽略 LLM 传参（防越权）。
+        actor_id = (request.headers.get("X-Hermes-Actor-Id") or "").strip()
         session_id = request.match_info["session_id"]
         _, err = self._get_existing_session_or_404(session_id)
         if err:
@@ -1563,6 +1565,7 @@ class APIServerAdapter(BasePlatformAdapter):
             ephemeral_system_prompt=system_prompt,
             session_id=session_id,
             gateway_session_key=gateway_session_key,
+            actor_id=actor_id,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = result.get("final_response", "") if isinstance(result, dict) else ""
@@ -1587,6 +1590,8 @@ class APIServerAdapter(BasePlatformAdapter):
         gateway_session_key, key_err = self._parse_session_key_header(request)
         if key_err is not None:
             return key_err
+        # 可信身份：网关在 HTTP 头注入认证用户；工具层据此绑定 requester，忽略 LLM 传参（防越权）。
+        actor_id = (request.headers.get("X-Hermes-Actor-Id") or "").strip()
         session_id = request.match_info["session_id"]
         _, err = self._get_existing_session_or_404(session_id)
         if err:
@@ -1654,6 +1659,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     stream_delta_callback=_delta,
                     tool_progress_callback=_tool_progress,
                     gateway_session_key=gateway_session_key,
+                    actor_id=actor_id,
                 )
                 final_response = result.get("final_response", "") if isinstance(result, dict) else ""
                 effective_session_id = result.get("session_id", session_id) if isinstance(result, dict) else session_id
@@ -3495,6 +3501,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        actor_id: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3517,6 +3524,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 chat_id=session_id or "",
                 session_key=gateway_session_key or session_id or "",
                 session_id=session_id or "",
+                user_id=actor_id or "",
             )
             try:
                 agent = self._create_agent(
