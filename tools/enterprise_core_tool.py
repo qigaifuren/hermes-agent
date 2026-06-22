@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 from enterprise_core.db import connect
 from enterprise_core.dispatch import dispatch_task, grant_resource_permission
 from enterprise_core.writeback import write_to_my_resource
-from enterprise_core.people import resolve_userid_by_name
+from enterprise_core.people import resolve_members_with_candidates, resolve_userid_by_name
 from enterprise_core.repositories import EnterpriseRepository
 from enterprise_core.resources import recommended_fields_for_table
 from enterprise_core.tools import (
@@ -64,6 +64,19 @@ ENTERPRISE_TOOLSET = "enterprise-core"
 
 def _json_result(payload: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, default=lambda obj: getattr(obj, "__dict__", str(obj)))
+
+
+def _trusted_requester(args: dict[str, Any]) -> str:
+    """绑定认证身份：优先用网关经可信头 X-Hermes-Actor-Id 注入的会话身份 HERMES_SESSION_USER_ID，
+    忽略 LLM 传的 requester_userid（防止 agent 把自己冒充成 muzhi/他人来越权）。无可信身份时回退入参。"""
+    actor = ""
+    try:
+        from gateway.session_context import get_session_env
+
+        actor = (get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
+    except Exception:
+        actor = ""
+    return actor or str(args.get("requester_userid") or "").strip()
 
 
 def _check_enterprise_core() -> bool:
@@ -114,7 +127,7 @@ def _handle_enterprise_recommend_smartsheet_fields(args: dict[str, Any], **kwarg
 
 
 def _handle_enterprise_propose_smartsheet(args: dict[str, Any], **kwargs: Any) -> str:
-    requester_userid = str(args.get("requester_userid") or "").strip()
+    requester_userid = _trusted_requester(args)
     conversation_id = str(args.get("conversation_id") or kwargs.get("task_id") or "").strip()
     table_name = str(args.get("table_name") or "").strip()
     permission_names = args.get("permission_names") or []
@@ -169,7 +182,7 @@ def _handle_enterprise_create_smartsheet(args: dict[str, Any], **kwargs: Any) ->
         if not isinstance(permission_names, list) or not isinstance(send_to_names, list):
             return _json_result({"error": "permission_names and send_to_names must be lists"})
         result = create_smartsheet_from_names(
-            requester_userid=str(args.get("requester_userid") or "").strip(),
+            requester_userid=_trusted_requester(args),
             conversation_id=str(args.get("conversation_id") or kwargs.get("task_id") or "").strip(),
             table_name=str(args.get("table_name") or "").strip(),
             permission_names=[str(name) for name in permission_names],
@@ -178,6 +191,7 @@ def _handle_enterprise_create_smartsheet(args: dict[str, Any], **kwargs: Any) ->
             wecom_client=client,
             create_fields=create_fields,
             field_names=field_names,
+            force_create=bool(args.get("force_create", False)),
         )
     resource = result["resource"]
     return _json_result(
@@ -235,7 +249,7 @@ def _matrix(value: Any, field_name: str) -> list[list[Any]]:
 def _handle_enterprise_create_doc(args: dict[str, Any], **kwargs: Any) -> str:
     try:
         result = create_wecom_doc(
-            requester_userid=str(args.get("requester_userid") or "").strip(),
+            requester_userid=_trusted_requester(args),
             conversation_id=str(args.get("conversation_id") or kwargs.get("task_id") or "").strip(),
             title=str(args.get("title") or "").strip(),
             content=str(args.get("content") or ""),
@@ -252,7 +266,7 @@ def _handle_enterprise_create_doc(args: dict[str, Any], **kwargs: Any) -> str:
 def _handle_enterprise_dispatch_task(args: dict[str, Any], **kwargs: Any) -> str:
     try:
         result = dispatch_task(
-            requester_userid=str(args.get("requester_userid") or "").strip(),
+            requester_userid=_trusted_requester(args),
             conversation_id=str(args.get("conversation_id") or kwargs.get("task_id") or "").strip(),
             task_type=str(args.get("task_type") or "").strip(),
             name=str(args.get("name") or "").strip(),
@@ -273,7 +287,7 @@ def _handle_enterprise_write_to_my_resource(args: dict[str, Any], **kwargs: Any)
         if not isinstance(records, list):
             return _json_result({"error": "records must be a list"})
         result = write_to_my_resource(
-            userid=str(args.get("requester_userid") or "").strip(),
+            userid=_trusted_requester(args),
             name_hint=str(args.get("name_hint") or "").strip(),
             records=[dict(r) for r in records],
             content=str(args.get("content") or ""),
@@ -294,7 +308,7 @@ def _weekly_report_job_id(requester_userid: str, resource_scope: dict[str, Any])
 
 
 def _handle_enterprise_schedule_report(args: dict[str, Any], **kwargs: Any) -> str:
-    requester = str(args.get("requester_userid") or "").strip()
+    requester = _trusted_requester(args)
     if not requester:
         return _json_result({"error": "requester_userid is required"})
     schedule = str(args.get("schedule") or "0 14 * * 5").strip()
@@ -327,7 +341,7 @@ def _handle_enterprise_schedule_report(args: dict[str, Any], **kwargs: Any) -> s
 
 def _handle_enterprise_update_doc_content(args: dict[str, Any], **kwargs: Any) -> str:
     result = update_doc_content(
-        requester_userid=str(args.get("requester_userid") or "").strip(),
+        requester_userid=_trusted_requester(args),
         docid=str(args.get("docid") or "").strip(),
         url=str(args.get("url") or "").strip(),
         content=str(args.get("content") or ""),
@@ -342,7 +356,7 @@ def _handle_enterprise_doc_batch_update(args: dict[str, Any], **kwargs: Any) -> 
     try:
         requests = _dict_list(args.get("requests") or [], "requests")
         result = doc_batch_update(
-            requester_userid=str(args.get("requester_userid") or "").strip(),
+            requester_userid=_trusted_requester(args),
             docid=str(args.get("docid") or "").strip(),
             url=str(args.get("url") or "").strip(),
             requests=requests,
@@ -357,7 +371,7 @@ def _handle_enterprise_doc_batch_update(args: dict[str, Any], **kwargs: Any) -> 
 def _handle_enterprise_upload_doc_image(args: dict[str, Any], **kwargs: Any) -> str:
     try:
         result = upload_doc_image(
-            requester_userid=str(args.get("requester_userid") or "").strip(),
+            requester_userid=_trusted_requester(args),
             filename=str(args.get("filename") or "").strip(),
             file_base64=str(args.get("file_base64") or ""),
             repo=_repo(),
@@ -371,7 +385,7 @@ def _handle_enterprise_upload_doc_image(args: dict[str, Any], **kwargs: Any) -> 
 def _handle_enterprise_doc_insert_image(args: dict[str, Any], **kwargs: Any) -> str:
     try:
         result = doc_insert_image(
-            requester_userid=str(args.get("requester_userid") or "").strip(),
+            requester_userid=_trusted_requester(args),
             docid=str(args.get("docid") or "").strip(),
             url=str(args.get("url") or "").strip(),
             image_id=str(args.get("image_id") or "").strip(),
@@ -387,7 +401,7 @@ def _handle_enterprise_doc_insert_image(args: dict[str, Any], **kwargs: Any) -> 
 def _handle_enterprise_doc_insert_table(args: dict[str, Any], **kwargs: Any) -> str:
     try:
         result = doc_insert_table(
-            requester_userid=str(args.get("requester_userid") or "").strip(),
+            requester_userid=_trusted_requester(args),
             docid=str(args.get("docid") or "").strip(),
             url=str(args.get("url") or "").strip(),
             rows=int(args.get("rows") or 1),
@@ -406,7 +420,7 @@ def _handle_enterprise_doc_update_text_property(args: dict[str, Any], **kwargs: 
     if not isinstance(text_property, dict):
         return _json_result({"error": "text_property must be an object"})
     result = doc_update_text_property(
-        requester_userid=str(args.get("requester_userid") or "").strip(),
+        requester_userid=_trusted_requester(args),
         docid=str(args.get("docid") or "").strip(),
         url=str(args.get("url") or "").strip(),
         start_index=int(args.get("start_index") or 1),
@@ -426,7 +440,7 @@ def _handle_enterprise_doc_get_content(args: dict[str, Any], **kwargs: Any) -> s
 def _handle_enterprise_create_smartpage(args: dict[str, Any], **kwargs: Any) -> str:
     try:
         result = create_wecom_smartpage(
-            requester_userid=str(args.get("requester_userid") or "").strip(),
+            requester_userid=_trusted_requester(args),
             conversation_id=str(args.get("conversation_id") or kwargs.get("task_id") or "").strip(),
             title=str(args.get("title") or "").strip(),
             pages=_dict_list(args.get("pages") or [], "pages"),
@@ -441,7 +455,7 @@ def _handle_enterprise_create_smartpage(args: dict[str, Any], **kwargs: Any) -> 
 
 def _handle_enterprise_smartsheet_get_schema(args: dict[str, Any], **kwargs: Any) -> str:
     result = smartsheet_get_schema(
-        requester_userid=str(args.get("requester_userid") or "").strip(),
+        requester_userid=_trusted_requester(args),
         docid=str(args.get("docid") or "").strip(),
         sheet_id=str(args.get("sheet_id") or "").strip(),
         repo=_repo(),
@@ -452,7 +466,7 @@ def _handle_enterprise_smartsheet_get_schema(args: dict[str, Any], **kwargs: Any
 
 def _handle_enterprise_online_sheet_get_schema(args: dict[str, Any], **kwargs: Any) -> str:
     result = online_sheet_get_schema(
-        requester_userid=str(args.get("requester_userid") or "").strip(),
+        requester_userid=_trusted_requester(args),
         docid=str(args.get("docid") or "").strip(),
         repo=_repo(),
         wecom_client=_wecom_client(),
@@ -462,7 +476,7 @@ def _handle_enterprise_online_sheet_get_schema(args: dict[str, Any], **kwargs: A
 
 def _handle_enterprise_online_sheet_get_range(args: dict[str, Any], **kwargs: Any) -> str:
     result = online_sheet_get_range(
-        requester_userid=str(args.get("requester_userid") or "").strip(),
+        requester_userid=_trusted_requester(args),
         docid=str(args.get("docid") or "").strip(),
         sheet_id=str(args.get("sheet_id") or "").strip(),
         range_a1=str(args.get("range") or args.get("range_a1") or "").strip(),
@@ -478,7 +492,7 @@ def _handle_enterprise_online_sheet_update_range(args: dict[str, Any], **kwargs:
     except ValueError as exc:
         return _json_result({"error": str(exc)})
     result = online_sheet_update_range(
-        requester_userid=str(args.get("requester_userid") or "").strip(),
+        requester_userid=_trusted_requester(args),
         docid=str(args.get("docid") or "").strip(),
         sheet_id=str(args.get("sheet_id") or "").strip(),
         range_a1=str(args.get("range") or args.get("range_a1") or "").strip(),
@@ -491,7 +505,7 @@ def _handle_enterprise_online_sheet_update_range(args: dict[str, Any], **kwargs:
 
 def _handle_enterprise_online_sheet_add_sheet(args: dict[str, Any], **kwargs: Any) -> str:
     result = online_sheet_add_sheet(
-        requester_userid=str(args.get("requester_userid") or "").strip(),
+        requester_userid=_trusted_requester(args),
         docid=str(args.get("docid") or "").strip(),
         title=str(args.get("title") or "").strip(),
         repo=_repo(),
@@ -502,7 +516,7 @@ def _handle_enterprise_online_sheet_add_sheet(args: dict[str, Any], **kwargs: An
 
 def _handle_enterprise_online_sheet_delete_sheet(args: dict[str, Any], **kwargs: Any) -> str:
     result = online_sheet_delete_sheet(
-        requester_userid=str(args.get("requester_userid") or "").strip(),
+        requester_userid=_trusted_requester(args),
         docid=str(args.get("docid") or "").strip(),
         sheet_id=str(args.get("sheet_id") or "").strip(),
         repo=_repo(),
@@ -517,7 +531,7 @@ def _handle_enterprise_smartsheet_add_records(args: dict[str, Any], **kwargs: An
     except ValueError as exc:
         return _json_result({"error": str(exc)})
     result = add_smartsheet_records(
-        requester_userid=str(args.get("requester_userid") or "").strip(),
+        requester_userid=_trusted_requester(args),
         docid=str(args.get("docid") or "").strip(),
         sheet_id=str(args.get("sheet_id") or "").strip(),
         records=records,
@@ -533,7 +547,7 @@ def _handle_enterprise_smartsheet_update_records(args: dict[str, Any], **kwargs:
     except ValueError as exc:
         return _json_result({"error": str(exc)})
     result = update_smartsheet_records(
-        requester_userid=str(args.get("requester_userid") or "").strip(),
+        requester_userid=_trusted_requester(args),
         docid=str(args.get("docid") or "").strip(),
         sheet_id=str(args.get("sheet_id") or "").strip(),
         records=records,
@@ -550,7 +564,7 @@ def _handle_enterprise_smartsheet_delete_records(args: dict[str, Any], **kwargs:
     except ValueError as exc:
         return _json_result({"error": str(exc)})
     result = delete_smartsheet_records(
-        requester_userid=str(args.get("requester_userid") or "").strip(),
+        requester_userid=_trusted_requester(args),
         docid=str(args.get("docid") or "").strip(),
         sheet_id=str(args.get("sheet_id") or "").strip(),
         record_ids=record_ids,
@@ -566,7 +580,7 @@ def _handle_enterprise_smartsheet_update_fields(args: dict[str, Any], **kwargs: 
     except ValueError as exc:
         return _json_result({"error": str(exc)})
     result = update_smartsheet_fields(
-        requester_userid=str(args.get("requester_userid") or "").strip(),
+        requester_userid=_trusted_requester(args),
         docid=str(args.get("docid") or "").strip(),
         sheet_id=str(args.get("sheet_id") or "").strip(),
         fields=fields,
@@ -582,7 +596,7 @@ def _handle_enterprise_smartsheet_delete_fields(args: dict[str, Any], **kwargs: 
     except ValueError as exc:
         return _json_result({"error": str(exc)})
     result = delete_smartsheet_fields(
-        requester_userid=str(args.get("requester_userid") or "").strip(),
+        requester_userid=_trusted_requester(args),
         docid=str(args.get("docid") or "").strip(),
         sheet_id=str(args.get("sheet_id") or "").strip(),
         field_ids=field_ids,
@@ -666,7 +680,7 @@ registry.register(
     toolset=ENTERPRISE_TOOLSET,
     schema={
         "name": "enterprise_create_smartsheet",
-        "description": "Create a real WeCom smartsheet, persist docid/resource/permissions/audit to Postgres, and optionally send the link. Use this immediately when the user asks to create/generate a table or random test smartsheet; do not only promise that you will create it. Accept either proposal_id or direct table/permission/send names when the user has clearly asked to create now. 当用户贴了带表头的数据（如订单表）时，必须从数据中抽取真实列名传 field_names，建表后再调用 enterprise_smartsheet_get_schema 取 sheet_id、enterprise_smartsheet_add_records 按列名分批写入所有数据行；不要只建空表。",
+        "description": "Create a real WeCom smartsheet, persist docid/resource/permissions/audit to Postgres, and optionally send the link. Use this immediately when the user asks to create/generate a table or random test smartsheet; do not only promise that you will create it. Accept either proposal_id or direct table/permission/send names when the user has clearly asked to create now. 当用户贴了带表头的数据（如订单表）时，必须从数据中抽取真实列名传 field_names，建表后再调用 enterprise_smartsheet_get_schema 取 sheet_id、enterprise_smartsheet_add_records 按列名分批写入所有数据行；不要只建空表。注意：用户指向【已有】表（如「把它/这张表 发给/分享给 某人」）时不要用本工具新建，应改用 enterprise_grant_resource_permission；同名资源已存在时本工具会返回 already_exists 而不重复建表。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -697,6 +711,11 @@ registry.register(
                 "create_fields": {
                     "type": "boolean",
                     "description": "是否自动建字段（字段类型统一用 FIELD_TYPE_TEXT）。一般不用显式设；传了 field_names 即视为 true。",
+                    "default": False,
+                },
+                "force_create": {
+                    "type": "boolean",
+                    "description": "默认 false：同名资源已存在时返回 already_exists、不重复建表。仅当用户明确要求「再建一张同名表」时才设 true。",
                     "default": False,
                 },
             },
@@ -830,12 +849,34 @@ def _handle_enterprise_grant_resource_permission(args: dict[str, Any], **kwargs:
         members = args.get("member_names") or []
         if not isinstance(members, list):
             return _json_result({"error": "member_names must be a list"})
+        member_names = [str(m) for m in members]
+        note = str(args.get("note") or "").strip()
+        repo = _repo()
+        # 接收人姓名解析不到时，不猜、不新建——返回候选让 agent 请用户确认。
+        resolution = resolve_members_with_candidates(member_names, repo)
+        if resolution["unresolved"]:
+            hints = []
+            for item in resolution["unresolved"]:
+                if item["candidates"]:
+                    cand = "，".join(f"{c['name']}({c['userid']})" for c in item["candidates"])
+                    hints.append(f"「{item['name']}」没找到，你是指：{cand}？")
+                else:
+                    hints.append(f"「{item['name']}」没找到，通讯录里也没有相近的人。")
+            return _json_result({
+                "status": "need_recipient_confirmation",
+                "unresolved": resolution["unresolved"],
+                "reply_text": (
+                    "；".join(hints)
+                    + "。请确认接收人，或先同步通讯录后再试——我没有新建表，也没有发给你。"
+                ),
+            })
         result = grant_resource_permission(
-            requester_userid=str(args.get("requester_userid") or "").strip(),
+            requester_userid=_trusted_requester(args),
             resource_name=str(args.get("resource_name") or "").strip(),
-            member_names=[str(m) for m in members],
-            repo=_repo(),
+            member_names=member_names,
+            repo=repo,
             wecom_client=_wecom_client(),
+            note=note,
         )
     except (ValueError, PermissionError) as exc:
         return _json_result({"error": str(exc)})
@@ -844,6 +885,7 @@ def _handle_enterprise_grant_resource_permission(args: dict[str, Any], **kwargs:
         "status": result["status"],
         "resource_id": resource.id,
         "member_userids": result["member_userids"],
+        "sent_userids": result.get("sent_userids", []),
         "reply_text": result["reply_text"],
     })
 
@@ -854,18 +896,22 @@ registry.register(
     schema={
         "name": "enterprise_grant_resource_permission",
         "description": (
-            "给已存在的智能表/文档添加成员读写权限（授权已有资源）。"
-            "用于「把这张表授权给XX」「给某文档加某人读写权限」等。"
-            "resource_name 按名称定位资源；member_names 是成员姓名或 userid 列表。"
-            "授权后默认给成员发卡片通知。注意：这是给【已有】资源补授权；"
-            "若要【新建】表并分发给团队，用 enterprise_dispatch_task。"
+            "把【已存在】的智能表/文档分享给某人（= 授权 read+write 并给对方发卡通知）。"
+            "凡是指向已有资源的「把它/这张表/这个文档 发给 / 发送 / 转发 / 分享给 某人」"
+            "「让某人也能看 / 也能改这张已有表」「把刚建的表给某人」"
+            "「把这张表授权给XX」「给某文档加某人读写权限」——都用本工具，"
+            "【不要新建】、【不要发给自己】。"
+            "resource_name 按名称定位已有资源；member_names 是接收人姓名或 userid 列表。"
+            "若用户还带了说明/留言（如「这是测试，可更改」），放进 note，会随卡片发给接收人。"
+            "区分：要【新建】表/文档并分发给团队才用 enterprise_dispatch_task。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "requester_userid": {"type": "string", "description": "发起授权的人 userid（须是资源负责人或管理者）"},
-                "resource_name": {"type": "string", "description": "目标表/文档名称"},
-                "member_names": {"type": "array", "items": {"type": "string"}, "description": "被授权成员姓名或 userid 列表"},
+                "requester_userid": {"type": "string", "description": "发起分享/授权的人 userid（须是资源负责人或管理者）"},
+                "resource_name": {"type": "string", "description": "目标【已有】表/文档名称"},
+                "member_names": {"type": "array", "items": {"type": "string"}, "description": "接收人姓名或 userid 列表"},
+                "note": {"type": "string", "description": "可选：发给接收人的附言/说明（如「这是测试，可更改」），随卡片送达。"},
             },
             "required": ["requester_userid", "resource_name", "member_names"],
         },
