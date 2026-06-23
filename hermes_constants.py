@@ -329,6 +329,39 @@ def parse_reasoning_effort(effort: str) -> dict | None:
     return None
 
 
+# 寒暄/招呼白名单（小写匹配）。命中其一且整条消息短、且不含企业意图关键词，才算 trivial。
+_TRIVIAL_GREETINGS = (
+    "hello", "hi", "hey", "yo", "hiya", "halo", "哈喽", "你好", "您好", "在吗",
+    "在么", "在不在", "早", "早上好", "中午好", "下午好", "晚上好", "晚安",
+    "谢谢", "多谢", "thanks", "thank you", "thx", "ok", "okay", "好的", "嗯",
+    "在", "test", "测试一下", "你是谁", "你好呀", "hello?", "在吗？",
+)
+
+# 企业意图关键词：命中任一就不算 trivial（保留 thinking），避免给真任务关推理。
+_ENTERPRISE_INTENT_HINTS = (
+    "建", "创建", "生成", "表", "文档", "分享", "发给", "发送", "转发", "授权",
+    "权限", "写", "填", "报表", "报告", "定时", "读", "改", "更新", "删除", "安排",
+    "任务", "列", "字段", "记录", "schema", "sheet", "doc", "smartsheet",
+)
+
+
+def is_trivial_message(text: str) -> bool:
+    """判断是否为寒暄/简单消息——这类消息本轮可关闭 thinking 以提速。
+
+    保守策略：必须同时满足 (1) 去空白后较短(<=12 字符)；(2) 不含任何企业意图关键词；
+    (3) 命中寒暄白名单(子串)。拿不准一律返回 False（保留默认推理）。
+    """
+    if not text or not isinstance(text, str):
+        return False
+    stripped = text.strip()
+    if not stripped or len(stripped) > 12:
+        return False
+    lowered = stripped.lower()
+    if any(hint in lowered for hint in _ENTERPRISE_INTENT_HINTS):
+        return False
+    return any(greet in lowered for greet in _TRIVIAL_GREETINGS)
+
+
 def is_termux() -> bool:
     """Return True when running inside a Termux (Android) environment.
 

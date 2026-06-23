@@ -1010,6 +1010,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        disable_tools: bool = False,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1035,7 +1036,9 @@ class APIServerAdapter(BasePlatformAdapter):
         model = _resolve_gateway_model()
 
         user_config = _load_gateway_config()
-        enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
+        # 寒暄/简单消息本轮不装企业工具集，省掉 ~22k token 工具 schema，
+        # prefill 从 ~2.3s 降到亚秒级（is_trivial_message 判定，见 _handle_session_chat）。
+        enabled_toolsets = [] if disable_tools else sorted(_get_platform_tools(user_config, "api_server"))
 
         max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
 
@@ -1559,6 +1562,10 @@ class APIServerAdapter(BasePlatformAdapter):
         if system_prompt is not None and not isinstance(system_prompt, str):
             return web.json_response(_openai_error("system_message must be a string", code="invalid_system_message"), status=400)
         history = self._conversation_history_for_session(session_id)
+        # 寒暄/简单消息走轻量路径：本轮不装企业工具，prefill 从 ~2.3s(22k token) 降到亚秒级。
+        # 判定保守（仅短寒暄、不含企业意图关键词），真任务一律保留全工具集。
+        from hermes_constants import is_trivial_message
+        disable_tools = is_trivial_message(user_message)
         result, usage = await self._run_agent(
             user_message=user_message,
             conversation_history=history,
@@ -1566,6 +1573,7 @@ class APIServerAdapter(BasePlatformAdapter):
             session_id=session_id,
             gateway_session_key=gateway_session_key,
             actor_id=actor_id,
+            disable_tools=disable_tools,
         )
         effective_session_id = result.get("session_id") if isinstance(result, dict) else session_id
         final_response = result.get("final_response", "") if isinstance(result, dict) else ""
@@ -1577,6 +1585,9 @@ class APIServerAdapter(BasePlatformAdapter):
                 "object": "hermes.session.chat.completion",
                 "session_id": effective_session_id or session_id,
                 "message": {"role": "assistant", "content": final_response},
+                # 本轮 assistant/tool 转录（含 tool_calls），供客户端按轮次识别资源结果，
+                # 免去额外 GET /messages 拉全量历史。纯增量字段，旧客户端忽略即可。
+                "turn_messages": self._turn_transcript_messages(history, user_message, result),
                 "usage": usage,
             },
             headers=headers,
@@ -3508,6 +3519,7 @@ class APIServerAdapter(BasePlatformAdapter):
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
         actor_id: Optional[str] = None,
+        disable_tools: bool = False,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3541,6 +3553,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_start_callback=tool_start_callback,
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
+                    disable_tools=disable_tools,
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent
