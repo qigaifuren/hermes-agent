@@ -1231,8 +1231,9 @@ registry.register(
     schema={
         "name": "enterprise_smartsheet_get_records",
         "description": (
-            "读取 WeCom 智能表已有记录（行内容），返回扁平化的 {字段标题: 文本} 列表，自动过滤空默认行。"
-            "用户要「读取/查看表里的内容/数据/填了什么」时用本工具——这是读写闭环里负责读取记录的工具。"
+            "读取 WeCom 智能表已有记录。每行返回 {record_id, values:{字段:文本}}——record_id 用于删除/更新"
+            "具体行（配合 enterprise_smartsheet_delete_records / update_records）。自动翻页跳过 WeCom 排在最前的空默认行。"
+            "用户要「读取/查看/清空/删除/修改表里的内容」前都先用本工具读出 record_id——这是读写闭环里负责读取的工具。"
             "先用 enterprise_smartsheet_get_schema 取真实 sheet_id 再调本工具；docid 用真实 API docid"
             "（不是 URL 里的 s3_ 标识）。schema 返回空 fields 不代表没数据，直接用本工具读记录验证。"
         ),
