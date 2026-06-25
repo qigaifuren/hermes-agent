@@ -27,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 from enterprise_core.db import connect
 from enterprise_core.dispatch import dispatch_task, grant_resource_permission
+from enterprise_core.groups import ensure_appchat
 from enterprise_core.writeback import write_to_my_resource
 from enterprise_core.people import resolve_members_with_candidates, resolve_userid_by_name
 from enterprise_core.repositories import EnterpriseRepository
@@ -207,16 +208,18 @@ def _handle_enterprise_create_smartsheet(args: dict[str, Any], **kwargs: Any) ->
 
 def _resource_json(result: dict[str, Any]) -> str:
     resource = result["resource"]
-    return _json_result(
-        {
-            "status": result["status"],
-            "resource_id": resource.id,
-            "resource_type": resource.resource_type,
-            "docid": resource.docid,
-            "url": resource.url,
-            "reply_text": result["reply_text"],
-        }
-    )
+    payload = {
+        "status": result["status"],
+        "resource_id": resource.id,
+        "resource_type": resource.resource_type,
+        "docid": resource.docid,
+        "url": resource.url,
+        "reply_text": result["reply_text"],
+    }
+    if "group_push" in result:
+        # 群推结果（group_key / "skipped:..." / "failed:..."）如实透出，不静默吞掉
+        payload["group_push"] = result["group_push"]
+    return _json_result(payload)
 
 
 def _string_list(value: Any, field_name: str) -> list[str]:
@@ -275,6 +278,7 @@ def _handle_enterprise_dispatch_task(args: dict[str, Any], **kwargs: Any) -> str
             content=str(args.get("content") or ""),
             repo=_repo(),
             wecom_client=_wecom_client(),
+            push_to_group=bool(args.get("push_to_group", False)),
         )
     except (ValueError, PermissionError) as exc:
         return _json_result({"error": str(exc)})
@@ -317,6 +321,10 @@ def _handle_enterprise_schedule_report(args: dict[str, Any], **kwargs: Any) -> s
     if not isinstance(scope, dict) or not isinstance(recipients, list):
         return _json_result({"error": "resource_scope must be object and recipients must be a list"})
     enabled = bool(args.get("enabled", True))
+    to_group = str(args.get("to_group") or "").strip()
+    recipient_policy: dict[str, Any] = {"to": [str(r) for r in recipients]}
+    if to_group:
+        recipient_policy["to_group"] = to_group
     repo = _repo()
     job_id = str(args.get("job_id") or "").strip() or _weekly_report_job_id(requester, scope)
     job = ScheduledJob(
@@ -324,7 +332,7 @@ def _handle_enterprise_schedule_report(args: dict[str, Any], **kwargs: Any) -> s
         created_by_userid=requester,
         job_type="weekly_report",
         schedule=schedule,
-        recipient_policy={"to": [str(r) for r in recipients]},
+        recipient_policy=recipient_policy,
         resource_scope=dict(scope),
         output_formats=["doc", "card"],
         enabled=enabled,
@@ -336,6 +344,7 @@ def _handle_enterprise_schedule_report(args: dict[str, Any], **kwargs: Any) -> s
         "schedule": schedule,
         "resource_scope": scope,
         "recipients": recipients,
+        "to_group": to_group,
     })
 
 
@@ -771,6 +780,7 @@ registry.register(
                 "target_team": {"type": "string", "description": "目标团队，如 '周婉倪团队'"},
                 "field_names": {"type": "array", "items": {"type": "string"}, "description": "智能表列名（task_type=smartsheet 时）"},
                 "content": {"type": "string", "description": "文档 Markdown 内容（task_type=doc 时）"},
+                "push_to_group": {"type": "boolean", "description": "可选：同时把任务卡片推送到目标团队的企业群（appchat）"},
             },
             "required": ["requester_userid", "task_type", "name", "target_team"],
         },
@@ -834,6 +844,7 @@ registry.register(
                 "recipients": {"type": "array", "items": {"type": "string"}, "description": "收件人 userid 列表"},
                 "enabled": {"type": "boolean", "description": "是否启用，默认 true；false 暂停"},
                 "job_id": {"type": "string", "description": "可选：传已有 job_id 更新配置"},
+                "to_group": {"type": "string", "description": "可选：把报告也推送到该企业群（appchat）的 group_key，如 'team:周婉倪'（先用 enterprise_create_group 建群）"},
             },
             "required": ["requester_userid", "resource_scope", "recipients"],
         },
@@ -890,6 +901,50 @@ def _handle_enterprise_grant_resource_permission(args: dict[str, Any], **kwargs:
     })
 
 
+def _handle_enterprise_create_group(args: dict[str, Any], **kwargs: Any) -> str:
+    """建/复用一个企业群（appchat）并把成员拉进去，供之后主动/定时推送任务、报告、通知。"""
+    try:
+        name = str(args.get("name") or "").strip()
+        if not name:
+            return _json_result({"error": "name（群名）必填"})
+        group_key = str(args.get("group_key") or "").strip() or f"group:{name}"
+        members = args.get("members") or []
+        if not isinstance(members, list):
+            return _json_result({"error": "members must be a list"})
+        member_names = [str(m) for m in members]
+        repo = _repo()
+        # 成员姓名解析不到时，不猜、不建群——返回候选让 agent 请用户确认。
+        resolution = resolve_members_with_candidates(member_names, repo)
+        if resolution["unresolved"]:
+            hints = []
+            for item in resolution["unresolved"]:
+                if item["candidates"]:
+                    cand = "，".join(f"{c['name']}({c['userid']})" for c in item["candidates"])
+                    hints.append(f"「{item['name']}」没找到，你是指：{cand}？")
+                else:
+                    hints.append(f"「{item['name']}」没找到，通讯录里也没有相近的人。")
+            return _json_result({
+                "status": "need_member_confirmation",
+                "unresolved": resolution["unresolved"],
+                "reply_text": "；".join(hints) + "。请确认群成员，或先同步通讯录后再试——我没有建群。",
+            })
+        owner = _trusted_requester(args)
+        chat = ensure_appchat(group_key, name, owner, resolution["resolved"], repo, _wecom_client())
+    except (ValueError, PermissionError) as exc:
+        return _json_result({"error": str(exc)})
+    return _json_result({
+        "status": "group_ready",
+        "group_key": chat.group_key,
+        "chatid": chat.chatid,
+        "member_userids": chat.member_userids,
+        "reply_text": (
+            f"企业群「{name}」已就绪（{len(chat.member_userids)} 人），"
+            f"之后用 enterprise_dispatch_task(push_to_group=true) 或 "
+            f"enterprise_schedule_report(to_group='{chat.group_key}') 即可往这个群推任务/报告。"
+        ),
+    })
+
+
 registry.register(
     name="enterprise_grant_resource_permission",
     toolset=ENTERPRISE_TOOLSET,
@@ -919,6 +974,34 @@ registry.register(
     handler=_handle_enterprise_grant_resource_permission,
     check_fn=_check_enterprise_core,
     emoji="grant",
+)
+
+registry.register(
+    name="enterprise_create_group",
+    toolset=ENTERPRISE_TOOLSET,
+    schema={
+        "name": "enterprise_create_group",
+        "description": (
+            "建一个企业群（应用群聊 appchat）并把成员拉进去，供之后主动/定时推送任务、报告、通知。"
+            "自建应用无法加入用户自建群，只能往本应用建的群发——所以「把消息发到某个群」要先用本工具建群。"
+            "owner 默认是发起的管理者；members 是成员姓名或 userid 列表（含 owner 至少 2 人）；"
+            "group_key 可选，用来稳定复用同一个群（不传则按群名派生）。返回 group_key，之后"
+            "enterprise_dispatch_task(push_to_group=true) 或 enterprise_schedule_report(to_group=...) 即可往这个群推。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "requester_userid": {"type": "string", "description": "建群的管理者 userid（会作为群 owner）"},
+                "name": {"type": "string", "description": "群名"},
+                "members": {"type": "array", "items": {"type": "string"}, "description": "成员姓名或 userid 列表"},
+                "group_key": {"type": "string", "description": "可选：稳定复用键，如 'team:周婉倪'；不传则按群名派生"},
+            },
+            "required": ["requester_userid", "name", "members"],
+        },
+    },
+    handler=_handle_enterprise_create_group,
+    check_fn=_check_enterprise_core,
+    emoji="group",
 )
 
 registry.register(
