@@ -904,6 +904,9 @@ def _handle_enterprise_grant_resource_permission(args: dict[str, Any], **kwargs:
         )
     except (ValueError, PermissionError) as exc:
         return _json_result({"error": str(exc)})
+    if result.get("status") == "need_resource_confirmation":
+        # 重名表：把候选透出去让 agent 请用户指明，不悄悄选一张
+        return _json_result(result)
     resource = result["resource"]
     return _json_result({
         "status": result["status"],
