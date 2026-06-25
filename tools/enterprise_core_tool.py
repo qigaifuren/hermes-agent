@@ -50,6 +50,7 @@ from enterprise_core.tools import (
     online_sheet_get_schema,
     online_sheet_update_range,
     propose_smartsheet,
+    smartsheet_get_records,
     smartsheet_get_schema,
     update_doc_content,
     update_smartsheet_fields,
@@ -469,6 +470,18 @@ def _handle_enterprise_smartsheet_get_schema(args: dict[str, Any], **kwargs: Any
         sheet_id=str(args.get("sheet_id") or "").strip(),
         repo=_repo(),
         wecom_client=_wecom_client(),
+    )
+    return _json_result(result)
+
+
+def _handle_enterprise_smartsheet_get_records(args: dict[str, Any], **kwargs: Any) -> str:
+    result = smartsheet_get_records(
+        requester_userid=_trusted_requester(args),
+        docid=str(args.get("docid") or "").strip(),
+        sheet_id=str(args.get("sheet_id") or "").strip(),
+        repo=_repo(),
+        wecom_client=_wecom_client(),
+        limit=int(args.get("limit") or 100),
     )
     return _json_result(result)
 
@@ -1207,6 +1220,33 @@ registry.register(
     handler=_handle_enterprise_smartsheet_get_schema,
     check_fn=_check_enterprise_core,
     emoji="schema",
+)
+
+registry.register(
+    name="enterprise_smartsheet_get_records",
+    toolset=ENTERPRISE_TOOLSET,
+    schema={
+        "name": "enterprise_smartsheet_get_records",
+        "description": (
+            "读取 WeCom 智能表已有记录（行内容），返回扁平化的 {字段标题: 文本} 列表，自动过滤空默认行。"
+            "用户要「读取/查看表里的内容/数据/填了什么」时用本工具——这是读写闭环里负责读取记录的工具。"
+            "先用 enterprise_smartsheet_get_schema 取真实 sheet_id 再调本工具；docid 用真实 API docid"
+            "（不是 URL 里的 s3_ 标识）。schema 返回空 fields 不代表没数据，直接用本工具读记录验证。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "requester_userid": {"type": "string"},
+                "docid": {"type": "string"},
+                "sheet_id": {"type": "string"},
+                "limit": {"type": "integer", "description": "最多读取多少行，默认 100"},
+            },
+            "required": ["requester_userid", "docid", "sheet_id"],
+        },
+    },
+    handler=_handle_enterprise_smartsheet_get_records,
+    check_fn=_check_enterprise_core,
+    emoji="read",
 )
 
 registry.register(
