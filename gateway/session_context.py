@@ -60,6 +60,7 @@ _SESSION_ID: ContextVar = ContextVar("HERMES_SESSION_ID", default=_UNSET)
 # so background-process notifications stay inside the originating Telegram
 # private-chat topic (those lanes route only with thread id + reply anchor).
 _SESSION_MESSAGE_ID: ContextVar = ContextVar("HERMES_SESSION_MESSAGE_ID", default=_UNSET)
+_SESSION_TURN_INTENT: ContextVar = ContextVar("HERMES_TURN_INTENT", default=_UNSET)
 
 # Cron auto-delivery vars — set per-job in run_job() so concurrent jobs
 # don't clobber each other's delivery targets.
@@ -77,6 +78,7 @@ _VAR_MAP = {
     "HERMES_SESSION_KEY": _SESSION_KEY,
     "HERMES_SESSION_ID": _SESSION_ID,
     "HERMES_SESSION_MESSAGE_ID": _SESSION_MESSAGE_ID,
+    "HERMES_TURN_INTENT": _SESSION_TURN_INTENT,
     "HERMES_CRON_AUTO_DELIVER_PLATFORM": _CRON_AUTO_DELIVER_PLATFORM,
     "HERMES_CRON_AUTO_DELIVER_CHAT_ID": _CRON_AUTO_DELIVER_CHAT_ID,
     "HERMES_CRON_AUTO_DELIVER_THREAD_ID": _CRON_AUTO_DELIVER_THREAD_ID,
@@ -140,6 +142,15 @@ def set_session_vars(
     return tokens
 
 
+def set_turn_intent(intent: str) -> None:
+    """设置本轮意图（read|mutate），供企业工具 harness 做读禁写判断。
+
+    与 set_session_vars 分开设置：意图在消息文本就绪后才算得出，
+    而 set_session_vars 在更早的会话建立阶段调用。
+    """
+    _SESSION_TURN_INTENT.set(str(intent or "read"))
+
+
 def clear_session_vars(tokens: list) -> None:
     """Mark session context variables as explicitly cleared.
 
@@ -161,6 +172,7 @@ def clear_session_vars(tokens: list) -> None:
         _SESSION_KEY,
         _SESSION_ID,
         _SESSION_MESSAGE_ID,
+        _SESSION_TURN_INTENT,
     ):
         var.set("")
     try:
