@@ -28,6 +28,7 @@ if str(ROOT) not in sys.path:
 from enterprise_core.db import connect
 from enterprise_core.dispatch import dispatch_task, grant_resource_permission
 from enterprise_core.groups import ensure_appchat
+from enterprise_core.sharing import push_existing_resource_to_group, rename_resource
 from enterprise_core.writeback import write_to_my_resource
 from enterprise_core.people import resolve_members_with_candidates, resolve_userid_by_name
 from enterprise_core.repositories import EnterpriseRepository
@@ -79,6 +80,49 @@ def _trusted_requester(args: dict[str, Any]) -> str:
     except Exception:
         actor = ""
     return actor or str(args.get("requester_userid") or "").strip()
+
+
+def _session_id(args: dict[str, Any], **kwargs: Any) -> str:
+    """本会话稳定标识（跨轮一致），用作"最近资源"记忆的键。
+
+    优先用网关注入的 HERMES_SESSION_ID（与 _trusted_requester 同源、task-local、跨轮稳定），
+    回退 conversation_id / task_id。决不依赖 LLM 传的 conversation_id（运行时并未注入）。
+    """
+    sid = ""
+    try:
+        from gateway.session_context import get_session_env
+
+        sid = (get_session_env("HERMES_SESSION_ID", "") or "").strip()
+    except Exception:
+        sid = ""
+    return sid or str(args.get("conversation_id") or kwargs.get("task_id") or "").strip()
+
+
+def _remember(session_id: str, requester: str, result: dict[str, Any], action: str = "touched") -> None:
+    """创建/发送类工具成功后，把资源记进会话"最近资源"记忆（best-effort）。"""
+    if not session_id or not isinstance(result, dict):
+        return
+    try:
+        from enterprise_core.session_memory import record_resource_touch, record_touch_for_resource
+
+        res = result.get("resource")
+        if res is not None and getattr(res, "id", ""):
+            record_touch_for_resource(_repo(), session_id, requester, res, action=action)
+            return
+        resource_id = str(result.get("resource_id") or "").strip()
+        if not resource_id:
+            return
+        record_resource_touch(
+            _repo(),
+            session_id,
+            requester,
+            resource_id=resource_id,
+            docid=str(result.get("docid") or "").strip(),
+            url=str(result.get("url") or "").strip(),
+            action=action,
+        )
+    except Exception:
+        pass
 
 
 def _check_enterprise_core() -> bool:
@@ -196,6 +240,7 @@ def _handle_enterprise_create_smartsheet(args: dict[str, Any], **kwargs: Any) ->
             force_create=bool(args.get("force_create", False)),
         )
     resource = result["resource"]
+    _remember(_session_id(args, **kwargs), _trusted_requester(args), result, action="created")
     return _json_result(
         {
             "status": result["status"],
@@ -264,6 +309,7 @@ def _handle_enterprise_create_doc(args: dict[str, Any], **kwargs: Any) -> str:
         )
     except ValueError as exc:
         return _json_result({"error": str(exc)})
+    _remember(_session_id(args, **kwargs), _trusted_requester(args), result, action="created")
     return _resource_json(result)
 
 
@@ -283,6 +329,7 @@ def _handle_enterprise_dispatch_task(args: dict[str, Any], **kwargs: Any) -> str
         )
     except (ValueError, PermissionError) as exc:
         return _json_result({"error": str(exc)})
+    _remember(_session_id(args, **kwargs), _trusted_requester(args), result, action="dispatched")
     return _resource_json(result)
 
 
@@ -460,6 +507,7 @@ def _handle_enterprise_create_smartpage(args: dict[str, Any], **kwargs: Any) -> 
         )
     except ValueError as exc:
         return _json_result({"error": str(exc)})
+    _remember(_session_id(args, **kwargs), _trusted_requester(args), result, action="created")
     return _resource_json(result)
 
 
@@ -470,6 +518,8 @@ def _handle_enterprise_smartsheet_get_schema(args: dict[str, Any], **kwargs: Any
         sheet_id=str(args.get("sheet_id") or "").strip(),
         repo=_repo(),
         wecom_client=_wecom_client(),
+        session_id=_session_id(args, **kwargs),
+        name_hint=str(args.get("name_hint") or args.get("table_name") or "").strip(),
     )
     return _json_result(result)
 
@@ -482,6 +532,8 @@ def _handle_enterprise_smartsheet_get_records(args: dict[str, Any], **kwargs: An
         repo=_repo(),
         wecom_client=_wecom_client(),
         limit=int(args.get("limit") or 100),
+        session_id=_session_id(args, **kwargs),
+        name_hint=str(args.get("name_hint") or args.get("table_name") or "").strip(),
     )
     return _json_result(result)
 
@@ -559,6 +611,8 @@ def _handle_enterprise_smartsheet_add_records(args: dict[str, Any], **kwargs: An
         records=records,
         repo=_repo(),
         wecom_client=_wecom_client(),
+        session_id=_session_id(args, **kwargs),
+        name_hint=str(args.get("name_hint") or args.get("table_name") or "").strip(),
     )
     return _json_result(result)
 
@@ -576,6 +630,8 @@ def _handle_enterprise_smartsheet_update_records(args: dict[str, Any], **kwargs:
         key_type=str(args.get("key_type") or "CELL_VALUE_KEY_TYPE_FIELD_TITLE"),
         repo=_repo(),
         wecom_client=_wecom_client(),
+        session_id=_session_id(args, **kwargs),
+        name_hint=str(args.get("name_hint") or args.get("table_name") or "").strip(),
     )
     return _json_result(result)
 
@@ -592,6 +648,8 @@ def _handle_enterprise_smartsheet_delete_records(args: dict[str, Any], **kwargs:
         record_ids=record_ids,
         repo=_repo(),
         wecom_client=_wecom_client(),
+        session_id=_session_id(args, **kwargs),
+        name_hint=str(args.get("name_hint") or args.get("table_name") or "").strip(),
     )
     return _json_result(result)
 
@@ -608,6 +666,8 @@ def _handle_enterprise_smartsheet_update_fields(args: dict[str, Any], **kwargs: 
         fields=fields,
         repo=_repo(),
         wecom_client=_wecom_client(),
+        session_id=_session_id(args, **kwargs),
+        name_hint=str(args.get("name_hint") or args.get("table_name") or "").strip(),
     )
     return _json_result(result)
 
@@ -624,6 +684,8 @@ def _handle_enterprise_smartsheet_delete_fields(args: dict[str, Any], **kwargs: 
         field_ids=field_ids,
         repo=_repo(),
         wecom_client=_wecom_client(),
+        session_id=_session_id(args, **kwargs),
+        name_hint=str(args.get("name_hint") or args.get("table_name") or "").strip(),
     )
     return _json_result(result)
 
@@ -908,6 +970,7 @@ def _handle_enterprise_grant_resource_permission(args: dict[str, Any], **kwargs:
         # 重名表：把候选透出去让 agent 请用户指明，不悄悄选一张
         return _json_result(result)
     resource = result["resource"]
+    _remember(_session_id(args, **kwargs), _trusted_requester(args), result, action="shared")
     return _json_result({
         "status": result["status"],
         "resource_id": resource.id,
@@ -959,6 +1022,68 @@ def _handle_enterprise_create_group(args: dict[str, Any], **kwargs: Any) -> str:
             f"enterprise_schedule_report(to_group='{chat.group_key}') 即可往这个群推任务/报告。"
         ),
     })
+
+
+def _handle_enterprise_rename_resource(args: dict[str, Any], **kwargs: Any) -> str:
+    """重命名【已有】表/文档：真调 rename_doc 改名并同步登记表。"""
+    try:
+        resource_ref = str(args.get("resource_name") or "").strip()
+        new_name = str(args.get("new_name") or "").strip()
+        if not resource_ref:
+            return _json_result({"error": "resource_name（要改名的表/文档名或链接）必填"})
+        if not new_name:
+            return _json_result({"error": "new_name（新名称）必填"})
+        result = rename_resource(
+            requester_userid=_trusted_requester(args),
+            resource_ref=resource_ref,
+            new_name=new_name,
+            repo=_repo(),
+            wecom_client=_wecom_client(),
+        )
+    except (ValueError, PermissionError) as exc:
+        return _json_result({"error": str(exc)})
+    if result.get("status") == "need_resource_confirmation":
+        # 重名：透出候选让 agent 请用户指明，不悄悄选一张、不新建
+        return _json_result(result)
+    out: dict[str, Any] = {"status": result["status"], "reply_text": result.get("reply_text", "")}
+    res = result.get("resource")
+    if res is not None:
+        out["resource_id"] = getattr(res, "id", "")
+    for key in ("old_name", "new_name", "wecom_error"):
+        if key in result:
+            out[key] = result[key]
+    return _json_result(out)
+
+
+def _handle_enterprise_push_resource_to_group(args: dict[str, Any], **kwargs: Any) -> str:
+    """把【已有】表/文档发到企业群(appchat)；群不存在时诚实提议建群，绝不新建表/用 wecom-cli。"""
+    try:
+        resource_ref = str(args.get("resource_name") or "").strip()
+        group_ref = str(args.get("group_key") or args.get("group_name") or "").strip()
+        if not resource_ref:
+            return _json_result({"error": "resource_name（要发送的已有表/文档名或链接）必填"})
+        if not group_ref:
+            return _json_result({"error": "group_name 或 group_key（目标企业群）必填"})
+        result = push_existing_resource_to_group(
+            requester_userid=_trusted_requester(args),
+            resource_ref=resource_ref,
+            group_ref=group_ref,
+            repo=_repo(),
+            wecom_client=_wecom_client(),
+        )
+    except (ValueError, PermissionError) as exc:
+        return _json_result({"error": str(exc)})
+    if result.get("status") == "need_resource_confirmation":
+        return _json_result(result)
+    out: dict[str, Any] = {"status": result["status"], "reply_text": result.get("reply_text", "")}
+    res = result.get("resource")
+    if res is not None:
+        out["resource_id"] = getattr(res, "id", "")
+        _remember(_session_id(args, **kwargs), _trusted_requester(args), result, action="sent_to_group")
+    for key in ("group_key", "group_name"):
+        if key in result:
+            out[key] = result[key]
+    return _json_result(out)
 
 
 registry.register(
@@ -1016,6 +1141,62 @@ registry.register(
         },
     },
     handler=_handle_enterprise_create_group,
+    check_fn=_check_enterprise_core,
+    emoji="group",
+)
+
+registry.register(
+    name="enterprise_rename_resource",
+    toolset=ENTERPRISE_TOOLSET,
+    schema={
+        "name": "enterprise_rename_resource",
+        "description": (
+            "重命名【已有】的智能表/文档（真调企业微信 rename_doc 接口改名，并同步登记表）。"
+            "凡「把这张表/这个文档改名叫…」「重命名为…」「表名改成…」都用本工具——"
+            "【不要】回复\"系统没有重命名工具/无法通过 API 改名\"，企业微信支持按真实 docid 改名。"
+            "resource_name 可传表/文档名，或直接传链接（含 s3_… 短 id，工具会自动反查真实 docid）；"
+            "new_name 是新名称。重名定位不到唯一资源会返回候选让你向用户确认，绝不新建。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "requester_userid": {"type": "string", "description": "发起改名的人 userid（须是资源负责人或管理者）"},
+                "resource_name": {"type": "string", "description": "要改名的【已有】表/文档名称，或其链接"},
+                "new_name": {"type": "string", "description": "新名称"},
+            },
+            "required": ["requester_userid", "resource_name", "new_name"],
+        },
+    },
+    handler=_handle_enterprise_rename_resource,
+    check_fn=_check_enterprise_core,
+    emoji="rename",
+)
+
+registry.register(
+    name="enterprise_push_resource_to_group",
+    toolset=ENTERPRISE_TOOLSET,
+    schema={
+        "name": "enterprise_push_resource_to_group",
+        "description": (
+            "把【已存在】的智能表/文档发到【企业群】(应用群 appchat)。凡「把这张表/这个文档发到…群里」"
+            "「推到 XX 群」指向已有资源的发群请求都用本工具，【不要新建表】、【绝不用 wecom-cli】、"
+            "【绝不让用户手动复制链接】。resource_name 传已有表/文档名或链接；group_name 传群名（或 group_key）。"
+            "若该企业群还不存在，工具会返回诚实说明（status=need_group）——自建应用发不进用户自己拉的微信群，"
+            "需先用 enterprise_create_group 建企业群并拉成员，再发；把这句话转达用户、别编\"权限限制\"。"
+            "区分：【新建】表/文档并发给【团队】用 enterprise_dispatch_task；发给【个人】用 enterprise_grant_resource_permission。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "requester_userid": {"type": "string", "description": "发起分享到群的人 userid（须是资源负责人或管理者）"},
+                "resource_name": {"type": "string", "description": "要发送的【已有】表/文档名称，或其链接"},
+                "group_name": {"type": "string", "description": "目标企业群名（也可改用 group_key 指定）"},
+                "group_key": {"type": "string", "description": "可选：企业群稳定键，如 'group:muzhi工作群' / 'team:周婉倪'"},
+            },
+            "required": ["requester_userid", "resource_name"],
+        },
+    },
+    handler=_handle_enterprise_push_resource_to_group,
     check_fn=_check_enterprise_core,
     emoji="group",
 )
@@ -1209,15 +1390,21 @@ registry.register(
     toolset=ENTERPRISE_TOOLSET,
     schema={
         "name": "enterprise_smartsheet_get_schema",
-        "description": "Load WeCom smartsheet sheets and fields before editing records. Use this before add/update/delete record operations when field titles or sheet_id are uncertain.",
+        "description": (
+            "读取 WeCom 智能表的子表与字段（编辑记录前用它确认 sheet_id / 列名）。"
+            "返回的 fields 即列名；WeCom 不回字段定义时会从已有数据【只读】推断（标 fields_inferred）——"
+            "绝不要为探测列名去写测试行。引用「那个表/这张表/刚才的表」时可【不传 docid】、改传 name_hint"
+            "（或留空），工具会按本会话最近操作过的表命中；docid 用真实 API docid（不是 URL 里的 s3_ 标识）。"
+        ),
         "parameters": {
             "type": "object",
             "properties": {
                 "requester_userid": {"type": "string"},
-                "docid": {"type": "string"},
-                "sheet_id": {"type": "string"},
+                "docid": {"type": "string", "description": "真实 API docid；引用『那个表』时可留空，改用 name_hint"},
+                "sheet_id": {"type": "string", "description": "可留空：留空时取该表第一个子表"},
+                "name_hint": {"type": "string", "description": "表名关键词；docid 留空时按本会话最近资源命中"},
             },
-            "required": ["requester_userid", "docid", "sheet_id"],
+            "required": ["requester_userid"],
         },
     },
     handler=_handle_enterprise_smartsheet_get_schema,
@@ -1234,18 +1421,21 @@ registry.register(
             "读取 WeCom 智能表已有记录。每行返回 {record_id, values:{字段:文本}}——record_id 用于删除/更新"
             "具体行（配合 enterprise_smartsheet_delete_records / update_records）。自动翻页跳过 WeCom 排在最前的空默认行。"
             "用户要「读取/查看/清空/删除/修改表里的内容」前都先用本工具读出 record_id——这是读写闭环里负责读取的工具。"
-            "先用 enterprise_smartsheet_get_schema 取真实 sheet_id 再调本工具；docid 用真实 API docid"
-            "（不是 URL 里的 s3_ 标识）。schema 返回空 fields 不代表没数据，直接用本工具读记录验证。"
+            "docid 用真实 API docid（不是 URL 里的 s3_ 标识）。返回里也带 fields（列名，空表会只读推断）。"
+            "引用「那个表/这张表/刚才的表」时【不要自己猜 docid】，可留空 docid、改传 name_hint（或都留空），"
+            "工具会按本会话最近操作过的表命中；多张同名会让你反问，绝不乱选、绝不新建。"
+            "这是【只读】工具——读取/查看内容只用它，绝不能用写/删工具去探测。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "requester_userid": {"type": "string"},
-                "docid": {"type": "string"},
-                "sheet_id": {"type": "string"},
+                "docid": {"type": "string", "description": "真实 API docid；引用『那个表』时可留空，改用 name_hint"},
+                "sheet_id": {"type": "string", "description": "可留空：留空时取该表第一个子表"},
+                "name_hint": {"type": "string", "description": "表名关键词；docid 留空时按本会话最近资源命中"},
                 "limit": {"type": "integer", "description": "最多读取多少行，默认 100"},
             },
-            "required": ["requester_userid", "docid", "sheet_id"],
+            "required": ["requester_userid"],
         },
     },
     handler=_handle_enterprise_smartsheet_get_records,
@@ -1462,3 +1652,25 @@ registry.register(
     check_fn=_check_enterprise_core,
     emoji="delete",
 )
+
+
+def _install_harness_guards() -> int:
+    """给本 toolset 中有策略的工具的 handler 套上 observe 模式 guard（幂等）。
+
+    在所有 registry.register(...) 之后调用：原地替换 entry.handler。
+    """
+    from enterprise_core.harness import guard, policy_for
+
+    wrapped_count = 0
+    for name in registry.get_tool_names_for_toolset(ENTERPRISE_TOOLSET):
+        if policy_for(name) is None:
+            continue
+        entry = registry.get_entry(name)
+        if entry is None or getattr(entry.handler, "__wrapped__", None) is not None:
+            continue
+        entry.handler = guard(name, entry.handler)
+        wrapped_count += 1
+    return wrapped_count
+
+
+_install_harness_guards()
