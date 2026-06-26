@@ -7447,6 +7447,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         history = history or []
         message_text = event.text or ""
+        # 设置本轮意图（确定性关键词启发式，非 LLM）供企业工具 harness 读禁写判断。
+        try:
+            from enterprise_core.harness import classify_turn_intent
+            from gateway.session_context import set_turn_intent
+            set_turn_intent(classify_turn_intent(message_text))
+        except Exception:
+            pass
         _group_sessions_per_user = getattr(self.config, "group_sessions_per_user", True)
         _thread_sessions_per_user = getattr(self.config, "thread_sessions_per_user", False)
         # Use the same helper every other call site uses so the write key here
@@ -13642,6 +13649,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 source=source,
                 session_key=session_key,
             )
+            # 寒暄/简单消息本轮关闭 thinking 提速；企业任务保留默认推理。
+            # 只覆盖本轮局部变量，不动 session override（后者持久，会污染后续任务轮次）。
+            try:
+                from hermes_constants import is_trivial_message
+                if is_trivial_message(message):
+                    reasoning_config = {"enabled": False}
+            except Exception:
+                pass
             self._reasoning_config = reasoning_config
             self._service_tier = self._load_service_tier()
             # Set up stream consumer for token streaming or interim commentary.
