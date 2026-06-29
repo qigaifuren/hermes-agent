@@ -7454,15 +7454,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             set_turn_intent(classify_turn_intent(message_text))
         except Exception:
             pass
-        # 用户肯定词 → 标记最近一条高危待确认为已确认（确定性、非 LLM）。
+        # 用户肯定词 → 标记唯一一条高危待确认为已确认（需身份匹配，确定性、非 LLM）。
         try:
             from gateway.session_context import get_session_env
             from enterprise_core.harness import mark_user_confirmation
             from enterprise_core.db import connect
             from enterprise_core.repositories import EnterpriseRepository
             _sid = (get_session_env("HERMES_SESSION_ID", "") or "").strip()
+            _uid = (get_session_env("HERMES_SESSION_USER_ID", "") or "").strip()
             if _sid:
-                mark_user_confirmation(EnterpriseRepository(connect()), _sid, message_text)
+                mark_user_confirmation(EnterpriseRepository(connect()), _sid, message_text, _uid)
         except Exception:
             pass
         _group_sessions_per_user = getattr(self.config, "group_sessions_per_user", True)
