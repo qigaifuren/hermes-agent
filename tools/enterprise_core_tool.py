@@ -595,6 +595,8 @@ def _handle_enterprise_online_sheet_delete_sheet(args: dict[str, Any], **kwargs:
         sheet_id=str(args.get("sheet_id") or "").strip(),
         repo=_repo(),
         wecom_client=_wecom_client(),
+        session_id=_session_id(args, **kwargs),
+        name_hint=str(args.get("name_hint") or "").strip(),
     )
     return _json_result(result)
 
