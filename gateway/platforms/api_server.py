@@ -3544,6 +3544,20 @@ class APIServerAdapter(BasePlatformAdapter):
                 session_id=session_id or "",
                 user_id=actor_id or "",
             )
+            # 企业工具安全 harness（与 gateway/run.py 等价；api_server 是 WeCom 等的真实执行入口）：
+            # 1) 设本轮意图供 read_turn_no_write 判断；2) 用户肯定词→标记高危待确认为已确认。
+            try:
+                from enterprise_core.harness import classify_turn_intent, mark_user_confirmation
+                from gateway.session_context import set_turn_intent
+                from enterprise_core.db import connect
+                from enterprise_core.repositories import EnterpriseRepository
+                set_turn_intent(classify_turn_intent(user_message))
+                _sid = (session_id or "").strip()
+                _uid = (actor_id or "").strip()
+                if _sid:
+                    mark_user_confirmation(EnterpriseRepository(connect()), _sid, user_message, _uid)
+            except Exception:
+                pass
             try:
                 agent = self._create_agent(
                     ephemeral_system_prompt=ephemeral_system_prompt,
@@ -3813,6 +3827,13 @@ class APIServerAdapter(BasePlatformAdapter):
                             platform="api_server",
                             session_key=approval_session_key,
                         )
+                        # 设本轮意图供 read_turn_no_write 判断（/v1/runs 路径）。
+                        try:
+                            from enterprise_core.harness import classify_turn_intent
+                            from gateway.session_context import set_turn_intent
+                            set_turn_intent(classify_turn_intent(user_message))
+                        except Exception:
+                            pass
                         register_gateway_notify(approval_session_key, _approval_notify)
                         r = agent.run_conversation(
                             user_message=user_message,
